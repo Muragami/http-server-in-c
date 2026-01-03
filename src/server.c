@@ -1,97 +1,29 @@
 #include <assert.h>
 #include <errno.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
 #include <pthread.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
-
-// ----- Bstring: growable string declarations ----- //
-
-struct Bstring
-{
-  char *data;
-  size_t length;
-  size_t capacity;
-};
-
-#define BSTRING_INIT_CAPACITY 16
-
-struct Bstring *bstring_init(size_t capacity, const char *const s);
-bool bstring_append(struct Bstring *self, const char *const s);
-void bstring_free(struct Bstring *self);
+#include "bstring.h"
+#define SWRAP_IMPLEMENTATION
+#include "swrap.h"
+#include "server.h"
+#include "pthread_pool.h"
 
 // ----- HTTP server related declarations ----- //
-
-enum HttpMethodTyp
-{
-  HTTP_UNKNOWN = 0,
-  HTTP_GET,
-  HTTP_POST,
-  HTTP_PUT,
-  HTTP_PATCH,
-  HTTP_DELETE,
-};
-
-struct HttpMethod
-{
-  const char *const str;
-  enum HttpMethodTyp typ;
-};
-
-const char HTTP_VERSION[] = "HTTP/1.1";
-
-struct HttpMethod KNOWN_HTTP_METHODS[] = {
-    {.str = "GET", .typ = HTTP_GET},
-    {.str = "POST", .typ = HTTP_POST},
-    {.str = "PUT", .typ = HTTP_PUT},
-    {.str = "PATCH", .typ = HTTP_PATCH},
-    {.str = "DELETE", .typ = HTTP_DELETE},
-};
-
-size_t KNOWN_HTTP_METHODS_LEN =
-    sizeof(KNOWN_HTTP_METHODS) / sizeof(KNOWN_HTTP_METHODS[0]);
-
-#define BUFFER_SIZE 1024
-#define MAX_HEADERS 128
-
-struct HttpHeader
-{
-  char *key;
-  char *value;
-};
-
-struct HttpRequest
-{
-  enum HttpMethodTyp method;
-  char *path;
-
-  // headers
-  struct HttpHeader *headers;
-  size_t headers_len;
-
-  // the request buffer
-  char *_buffer;
-  size_t _buffer_len;
-
-  struct Bstring *body;
-};
 
 void handle_connection(int conn_fd);
 
 int server_fd = -1;
-struct sockaddr_in client_addr;
-socklen_t client_addr_len = sizeof(client_addr);
+struct swrap_addr client_addr;
 
 struct Bstring *filename = NULL;
 
 int main(int argc, char **argv)
 {
+  swrapInit();
   // set base directory of public files (defaults to public)
   if (argc > 2)
   {
@@ -110,7 +42,7 @@ int main(int argc, char **argv)
   setbuf(stdout, NULL);
   setbuf(stderr, NULL);
 
-  server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  server_fd = swrapSocket(SWRAP_TCP, SWRAP_BIND, 0, "0.0.0.0", "42024");
   if (server_fd == -1)
   {
     printf("error: Socket creation failed: %s...\n", strerror(errno));
@@ -122,27 +54,13 @@ int main(int argc, char **argv)
   // will still be hanging around for a while, and if you try to restart
   // the server, you'll get an "Address already in use" error message
   int reuse = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
-      0)
+  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0)
   {
     printf("error: SO_REUSEADDR failed: %s \n", strerror(errno));
     goto cleanup;
   }
-
-  struct sockaddr_in serv_addr = {
-      .sin_family = AF_INET,
-      .sin_port = htons(4221),
-      .sin_addr = {htonl(INADDR_ANY)},
-  };
-
-  if (bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0)
-  {
-    printf("error: Bind failed: %s \n", strerror(errno));
-    goto cleanup;
-  }
-
   int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0)
+  if (swrapListen(server_fd, connection_backlog) != 0)
   {
     printf("error: Listen failed: %s \n", strerror(errno));
     goto cleanup;
@@ -152,8 +70,7 @@ int main(int argc, char **argv)
 
   while (true)
   {
-    int conn_fd =
-        accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+    int conn_fd = swrapAccept(server_fd, &client_addr);
     if (conn_fd == -1)
     {
       printf("error: Accept failed: %s \n", strerror(errno));
@@ -166,7 +83,7 @@ int main(int argc, char **argv)
 cleanup:
   if (server_fd != -1)
   {
-    close(server_fd);
+    swrapClose(server_fd);
   }
 
   if (filename != NULL)
@@ -174,6 +91,7 @@ cleanup:
     bstring_free(filename);
   }
 
+  swrapTerminate();
   return 0;
 }
 
@@ -214,42 +132,37 @@ void *_handle_connection(void *conn_fd_ptr)
     goto cleanup;
   }
 
-  ssize_t bytes_read = recv(conn_fd, req._buffer, BUFFER_SIZE - 1, 0);
-  if (bytes_read == -1)
+  ssize_t bytes_read = swrapReceive(conn_fd, req._buffer, BUFFER_SIZE - 1);
+  if (bytes_read <= 0)
   {
-    printf("error: Recv failed: %s \n", strerror(errno));
-    goto cleanup;
-  }
-  else if (bytes_read == 0)
-  {
-    printf("error: Recv: connection closed by client\n");
-    goto cleanup;
+    printf("error: Recv failed/closed: %s \n", strerror(errno));
+    return NULL;
   }
 
   // null-terminate _buffer
   req._buffer[bytes_read] = '\0';
-
   req._buffer_len = (size_t)bytes_read;
 
   char *parse_buffer = req._buffer;
 
   // parse method & store it to req
   char *method = strsep(&parse_buffer, " ");
-  for (size_t i = 0; i < KNOWN_HTTP_METHODS_LEN; ++i)
+  int i = 0;
+  while (KNOWN_HTTP_METHODS[i].str != NULL)
   {
     if (strcmp(method, KNOWN_HTTP_METHODS[i].str) == 0)
     {
       req.method = KNOWN_HTTP_METHODS[i].typ;
-
       break;
     }
+    i++;
   }
 
   // unknowm method
   if (req.method == HTTP_UNKNOWN)
   {
     printf("error(parse): unknown method %s\n", method);
-    goto cleanup;
+    return NULL;
   }
 
   // parse path & store it to req
@@ -520,100 +433,4 @@ void handle_connection(int conn_fd)
 
   *conn_fd_ptr = conn_fd;
   pthread_create(&new_thread, NULL, _handle_connection, conn_fd_ptr);
-}
-
-/**
- * initializes a new Bstring. returns `NULL` if memory allocation fails.
- *
- * @param capacity the initial capacity of the vector. if 0, it will be set
- * to a default value.
- * @param s inital value. it must be null terminated. pass `NULL` for no
- * initial value.
- */
-struct Bstring *bstring_init(size_t capacity, const char *const s)
-{
-  struct Bstring *bstr = malloc(sizeof(struct Bstring));
-  if (bstr == NULL)
-  {
-    return NULL;
-  }
-
-  if (capacity == 0)
-  {
-    capacity = BSTRING_INIT_CAPACITY;
-  }
-
-  const size_t slen = (s == NULL) ? 0 : strlen(s);
-  if (slen >= capacity)
-  {
-    capacity = slen + 1; // +1 for null terminator
-  }
-
-  bstr->data = malloc(sizeof(char) * capacity);
-  if (bstr->data == NULL)
-  {
-    free(bstr);
-    return NULL;
-  }
-
-  // copy if not NULL
-  if (s != NULL)
-  {
-    memcpy(bstr->data, s, slen);
-  }
-
-  bstr->capacity = capacity;
-  bstr->length = slen;
-  bstr->data[slen] = '\0';
-
-  return bstr;
-}
-
-/**
- * appends the given C string at the end of given bstring
- *
- * @param self the Bstring to append the C string to
- * @param the NULL-terminated C string to be appended
- */
-bool bstring_append(struct Bstring *self, const char *const s)
-{
-  assert(self != NULL);
-  assert(s != NULL);
-
-  const size_t slen = strlen(s);
-  const size_t new_len = self->length + slen;
-  if (new_len >= self->capacity)
-  {
-    // try doubling the current capacity
-    size_t new_cap = self->capacity * 2;
-
-    // check if it's enough
-    if (new_len >= new_cap)
-    {
-      new_cap = new_len + 1; // +1 for null terminator
-    }
-
-    char *new_data = realloc(self->data, new_cap);
-    if (new_data == NULL)
-    {
-      return false;
-    }
-
-    self->data = new_data;
-    self->capacity = new_cap;
-  }
-
-  memcpy(&self->data[self->length], s, slen); // append
-  self->length = new_len;                     // set new length
-  self->data[new_len] = '\0';                 // null terminate
-
-  return true;
-}
-
-void bstring_free(struct Bstring *self)
-{
-  assert(self != NULL);
-
-  free(self->data);
-  free(self);
 }
