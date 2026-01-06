@@ -1,4 +1,5 @@
 #include "bstring.h"
+#include "uthash.h"
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -69,3 +70,8 @@ struct HttpRequest
 
     struct Bstring *body;
 };
+
+extern struct Bstring *filename;
+extern void http_handle_connection(int conn_fd, void *arg, int arg_len);
+extern void http_start();
+extern void http_end();
