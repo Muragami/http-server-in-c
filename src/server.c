@@ -85,7 +85,12 @@ int main(int argc, char **argv)
   return (WSAStartup(MAKEWORD(2, 2), &WsaData) != NO_ERROR);
 #endif
   // read our config file
-  read_config((const char *)argv[2]);
+  if (argc != 2)
+  {
+    fprintf(stderr, "Usage: %s <config_file>\n", argv[0]);
+    return 1;
+  }
+  read_config((const char *)argv[1]);
   // create the server event base
   server = event_base_new();
   if (!server)
