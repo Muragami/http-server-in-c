@@ -329,17 +329,14 @@ cleanup:
     return NULL;
 }
 
-void handle_connection(int conn_fd)
+void http_handle_connection(int conn_fd, void *arg, int arg_len)
 {
-    pthread_t new_thread;
-    int *conn_fd_ptr = malloc(sizeof(int));
-    if (conn_fd_ptr == NULL)
-    {
-        printf("error: handle_connection(): Failed to allocate memory for "
-               "conn_fd_ptr");
-        return;
-    }
+}
 
-    *conn_fd_ptr = conn_fd;
-    pthread_create(&new_thread, NULL, _handle_connection, conn_fd_ptr);
+extern void http_start()
+{
+}
+
+extern void http_end()
+{
 }
