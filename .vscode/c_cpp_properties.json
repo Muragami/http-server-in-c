@@ -4,8 +4,7 @@
             "name": "Win32",
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/include/**",
-                "c:/msys64/ucrt64/include/libxml2/**"
+                "${workspaceFolder}/lib/**"
             ],
             "defines": [
                 "_DEBUG",

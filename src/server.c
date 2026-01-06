@@ -1,15 +1,19 @@
 #include "server.h"
 #include "pthread_pool.h"
+#include "tconfig.h"
 
 // ----- HTTP server related declarations ----- //
 
 extern struct Bstring *filename;
 extern void handle_connection(int conn_fd);
 
-evutil_socket_t listener;
-struct sockaddr_in sin;
-struct event_base *base;
-struct event *listener_event;
+static evutil_socket_t listener;
+static struct sockaddr_in sin;
+static struct event_base *base;
+static struct event *listener_event;
+struct TConfig *config = NULL;
+static int port = 40000;
+static int threads = 16;
 
 void cleanup_and_exit()
 {
@@ -50,25 +54,40 @@ void do_accept(evutil_socket_t listener, short event, void *arg)
   }
 }
 
+void read_config(const char *config_path)
+{
+  config = tconfig_new();
+  if (tconfig_read_file(config, config_path) != 0)
+  {
+    fprintf(stderr, "Failed to read config file: %s\n", config_path);
+    tconfig_free(config);
+    return;
+  }
+
+  // get server config
+  ini_table_get_entry_as_int(config, "server", "port", &port);
+  ini_table_get_entry_as_int(config, "server", "threads", &threads);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
   WSADATA WsaData;
   return (WSAStartup(MAKEWORD(2, 2), &WsaData) != NO_ERROR);
 #endif
-
+  read_config((const char *)argv[2]);
   base = event_base_new();
   if (!base)
     return; /*XXXerr*/
 
   sin.sin_family = AF_INET;
   sin.sin_addr.s_addr = 0;
-  sin.sin_port = htons(40713);
+  sin.sin_port = htons(port);
 
   listener = socket(AF_INET, SOCK_STREAM, 0);
   evutil_make_socket_nonblocking(listener);
 
-#ifndef WIN32
+#ifndef _WIN32
   {
     int one = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
